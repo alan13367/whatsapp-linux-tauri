@@ -1,0 +1,23 @@
+[package]
+name = "whatsapp-linux-tauri"
+version = "0.1.0"
+description = "Unofficial WhatsApp Web wrapper for Arch Linux"
+authors = ["Alan Beltran Pozo"]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/alan13367/whatsapp-linux-tauri"
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+tauri = { version = "=2.11.6", features = ["image-png", "tray-icon"] }
+tauri-plugin-global-shortcut = "=2.3.2"
+tauri-plugin-opener = "=2.5.5"
+tauri-plugin-single-instance = "=2.4.5"
+url = "=2.5.7"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "=0.18.2"
+webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
