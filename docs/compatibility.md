@@ -17,8 +17,22 @@ Test environment: current Arch Linux x86_64, KDE Plasma Wayland, WebKitGTK 4.1.
 
 ## Environment-specific results
 
-- KDE Wayland blocked the registered `Ctrl+Shift+B` global shortcut in this session. The tray privacy action remains the supported fallback, as documented.
+- The initial KDE Wayland build did not receive its X11 global shortcut. Wayland now uses a native window shortcut for `Ctrl+Shift+B`; use the tray privacy action while the window is hidden.
 - The Arch runtime must provide `gst-plugins-good`. The application now checks for its `autoaudiosink` element before creating the webview and shows an actionable error instead of allowing WebKitGTK to crash later.
+
+## Automated regression checks, October 6, 2026
+
+The native WebKit check uses local HTML, an ephemeral browser profile, and a temporary attachment directory. It passed on the same Arch Wayland environment and verified:
+
+- The window privacy shortcut activates once, rejects incomplete modifier combinations, and survives navigation.
+- Privacy blur overrides page CSS, applies immediately, and remains active before the first script on a reloaded page runs.
+- Toggling privacy repeatedly removes the blur, and the stylesheet covers the allowed auxiliary origins while excluding foreign documents.
+- A local WhatsApp attachment blob downloads with its original filename and contents. The previous navigation filter blocked this test before a download could start.
+- Background foreign navigation and popup requests stay blocked, while deliberate external links and popups reach the external opener once.
+
+The release badge benchmark rendered 500 icons in 1.85 seconds with repeated PNG decoding and resizing, versus 0.59 milliseconds with the cached base image. This measures icon generation only. Counts above 99 also skip unchanged native icons, avoiding repeated tray PNG writes while keeping the exact unread title and tray label current.
+
+The native check and benchmark commands are documented in the README. These checks do not exercise a linked account.
 
 ## Still requiring interactive verification
 

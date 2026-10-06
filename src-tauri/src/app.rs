@@ -36,7 +36,6 @@ pub fn run() {
                 .open_js_links_on_click(false)
                 .build(),
         )
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppState::default())
         .setup(setup)
         .on_window_event(|window, event| {
@@ -77,9 +76,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn create_main_window(app: &tauri::App) -> tauri::Result<WebviewWindow> {
-    let app_for_new_window = app.handle().clone();
     let app_for_title = app.handle().clone();
-    let app_for_load = app.handle().clone();
 
     let config = app
         .config()
@@ -90,21 +87,11 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<WebviewWindow> {
         .expect("main window config must exist");
 
     let builder = WebviewWindowBuilder::from_config(app, config)?
-        .initialization_script(privacy::INITIALIZATION_SCRIPT)
         .enable_clipboard_access()
         .devtools(cfg!(debug_assertions))
-        .on_new_window(move |url, _features| {
-            navigation::open_web_url(&app_for_new_window, &url);
-            tauri::webview::NewWindowResponse::Deny
-        })
+        .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Deny)
         .on_document_title_changed(move |_window, title| {
             update_unread(&app_for_title, parse_unread_count(&title));
-        })
-        .on_page_load(move |_window, payload| {
-            if navigation::is_allowed_app_navigation(payload.url()) {
-                // Apply at navigation start to minimize exposure, then again after load as a fallback.
-                privacy::reapply(&app_for_load);
-            }
         })
         .on_download(|_webview, event| {
             if let tauri::webview::DownloadEvent::Finished { url, path, success } = event {
@@ -114,6 +101,22 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<WebviewWindow> {
             }
             true
         });
+
+    #[cfg(not(target_os = "linux"))]
+    let builder = {
+        let app_for_new_window = app.handle().clone();
+        builder
+            .initialization_script(privacy::INITIALIZATION_SCRIPT)
+            .on_page_load(|window, payload| {
+                if navigation::is_allowed_app_navigation(payload.url()) {
+                    privacy::reapply(window.app_handle());
+                }
+            })
+            .on_new_window(move |url, _features| {
+                navigation::open_web_url(&app_for_new_window, &url);
+                tauri::webview::NewWindowResponse::Deny
+            })
+    };
 
     let builder = if std::env::args().any(|argument| argument == "--chromium-user-agent") {
         builder.user_agent(CHROMIUM_USER_AGENT)
@@ -162,10 +165,9 @@ fn configure_linux_webview(window: &WebviewWindow) -> tauri::Result<()> {
     let app_for_navigation = window.app_handle().clone();
     window.with_webview(move |platform_webview| {
         use webkit2gtk::{
-            glib::prelude::*, DeviceInfoPermissionRequest, NavigationPolicyDecision,
-            NavigationPolicyDecisionExt, NotificationPermissionRequest, PermissionRequestExt,
-            PolicyDecisionExt, PolicyDecisionType, SettingsExt, URIRequestExt,
-            UserMediaPermissionRequest, UserMediaPermissionRequestExt, WebViewExt,
+            glib::prelude::*, DeviceInfoPermissionRequest, NotificationPermissionRequest,
+            PermissionRequestExt, SettingsExt, UserMediaPermissionRequest,
+            UserMediaPermissionRequestExt, WebViewExt,
         };
 
         let webview = platform_webview.inner();
@@ -177,37 +179,8 @@ fn configure_linux_webview(window: &WebviewWindow) -> tauri::Result<()> {
             settings.set_enable_write_console_messages_to_stdout(cfg!(debug_assertions));
         }
 
-        webview.connect_decide_policy(move |_view, decision, decision_type| {
-            if decision_type != PolicyDecisionType::NavigationAction {
-                return false;
-            }
-            let Some(policy) = decision.downcast_ref::<NavigationPolicyDecision>() else {
-                return false;
-            };
-            let Some(action) = policy.navigation_action() else {
-                return false;
-            };
-            let Some(request) = action.request() else {
-                return false;
-            };
-            let Some(uri) = request.uri() else {
-                return false;
-            };
-            let Ok(url) = url::Url::parse(uri.as_str()) else {
-                decision.ignore();
-                return true;
-            };
-
-            match navigation::decide(&url) {
-                navigation::NavigationDecision::AllowInApp => decision.use_(),
-                navigation::NavigationDecision::OpenExternal if action.is_user_gesture() => {
-                    navigation::open_web_url(&app_for_navigation, &url);
-                    decision.ignore();
-                }
-                navigation::NavigationDecision::OpenExternal
-                | navigation::NavigationDecision::Deny => decision.ignore(),
-            }
-            true
+        navigation::configure_webview(&webview, move |url| {
+            navigation::open_web_url(&app_for_navigation, url);
         });
 
         webview.connect_permission_request(|view, request| {
@@ -311,6 +284,28 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn register_privacy_shortcut(app: &tauri::App) {
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+
+        if gtk::gdk::Display::default()
+            .is_some_and(|display| display.type_().name() == "GdkWaylandDisplay")
+        {
+            privacy::register_local_shortcut(app.handle());
+            return;
+        }
+    }
+
+    if let Err(error) = app
+        .handle()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+    {
+        eprintln!("global shortcut support unavailable: {error}");
+        #[cfg(target_os = "linux")]
+        privacy::register_local_shortcut(app.handle());
+        return;
+    }
+
     if let Err(error) =
         app.global_shortcut()
             .on_shortcut("Ctrl+Shift+B", |app, _shortcut, event| {
@@ -320,6 +315,8 @@ fn register_privacy_shortcut(app: &tauri::App) {
             })
     {
         eprintln!("global privacy shortcut unavailable: {error}");
+        #[cfg(target_os = "linux")]
+        privacy::register_local_shortcut(app.handle());
     }
 }
 
@@ -333,7 +330,7 @@ pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
 
 fn toggle_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-        if window.is_visible().unwrap_or(false) {
+        if window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false) {
             let _ = window.hide();
         } else {
             show_main_window(app);
@@ -350,7 +347,8 @@ fn quit<R: Runtime>(app: &AppHandle<R>) {
 
 fn update_unread<R: Runtime>(app: &AppHandle<R>, count: u32) {
     let state = app.state::<AppState>();
-    if state.unread.swap(count, Ordering::SeqCst) == count {
+    let previous = state.unread.swap(count, Ordering::SeqCst);
+    if previous == count {
         return;
     }
 
@@ -362,26 +360,30 @@ fn update_unread<R: Runtime>(app: &AppHandle<R>, count: u32) {
     let tooltip = if count == 0 {
         "WhatsApp Linux".to_owned()
     } else {
-        format!("WhatsApp — {count} unread")
+        format!("WhatsApp: {count} unread")
     };
 
     if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
         let _ = window.set_title(&title);
     }
 
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_tooltip(Some(&tooltip));
+        let _ = tray.set_title((count > 0).then_some(count.to_string()));
+    }
+
+    if badge::display_count(previous) == badge::display_count(count) {
+        return;
+    }
     let Ok(rendered) = badge::render(count) else {
         return;
     };
-    let window_icon = to_tauri_image(rendered.clone());
-    let tray_icon = to_tauri_image(rendered);
-
+    let icon = tauri::image::Image::new(&rendered.rgba, rendered.width, rendered.height);
     if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-        let _ = window.set_icon(window_icon);
+        let _ = window.set_icon(icon.clone());
     }
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let _ = tray.set_icon(Some(tray_icon));
-        let _ = tray.set_tooltip(Some(&tooltip));
-        let _ = tray.set_title((count > 0).then_some(count.to_string()));
+        let _ = tray.set_icon(Some(icon));
     }
 }
 

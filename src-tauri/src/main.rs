@@ -3,6 +3,9 @@ mod badge;
 mod navigation;
 mod privacy;
 
+#[cfg(all(test, target_os = "linux"))]
+mod webview_tests;
+
 fn main() {
     configure_linux_runtime();
     app::run();

@@ -1,7 +1,10 @@
+use std::sync::OnceLock;
+
 use image::{imageops::FilterType, Rgba, RgbaImage};
 
 const ICON_SIZE: u32 = 64;
 const BASE_ICON: &[u8] = include_bytes!("../icons/icon.png");
+static RESIZED_ICON: OnceLock<Result<RgbaImage, image::ImageError>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BadgeImage {
@@ -11,10 +14,17 @@ pub struct BadgeImage {
 }
 
 pub fn render(unread: u32) -> Result<BadgeImage, image::ImageError> {
-    let decoded = image::load_from_memory(BASE_ICON)?;
-    let mut icon = decoded
-        .resize_exact(ICON_SIZE, ICON_SIZE, FilterType::Lanczos3)
-        .to_rgba8();
+    let base = RESIZED_ICON.get_or_init(|| {
+        image::load_from_memory(BASE_ICON).map(|decoded| {
+            decoded
+                .resize_exact(ICON_SIZE, ICON_SIZE, FilterType::Lanczos3)
+                .to_rgba8()
+        })
+    });
+    let mut icon = base
+        .as_ref()
+        .map_err(|error| image::ImageError::IoError(std::io::Error::other(error.to_string())))?
+        .clone();
 
     if unread > 0 {
         draw_badge(&mut icon, unread);
@@ -27,13 +37,17 @@ pub fn render(unread: u32) -> Result<BadgeImage, image::ImageError> {
     })
 }
 
+pub fn display_count(unread: u32) -> u32 {
+    unread.min(100)
+}
+
 fn draw_badge(icon: &mut RgbaImage, unread: u32) {
     const CENTER_X: i32 = 48;
     const CENTER_Y: i32 = 16;
     const RADIUS: i32 = 16;
 
-    for y in 0..ICON_SIZE as i32 {
-        for x in 0..ICON_SIZE as i32 {
+    for y in (CENTER_Y - RADIUS).max(0)..=(CENTER_Y + RADIUS).min(ICON_SIZE as i32 - 1) {
+        for x in (CENTER_X - RADIUS).max(0)..=(CENTER_X + RADIUS).min(ICON_SIZE as i32 - 1) {
             let dx = x - CENTER_X;
             let dy = y - CENTER_Y;
             if dx * dx + dy * dy <= RADIUS * RADIUS {
@@ -56,13 +70,13 @@ fn draw_text(icon: &mut RgbaImage, text: &str, center_x: i32, center_y: i32) {
     const GLYPH_HEIGHT: i32 = 5;
     const GAP: i32 = 1;
 
-    let chars: Vec<char> = text.chars().collect();
-    let text_width = (chars.len() as i32 * GLYPH_WIDTH + (chars.len() as i32 - 1) * GAP) * SCALE;
+    let length = text.len() as i32;
+    let text_width = (length * GLYPH_WIDTH + (length - 1) * GAP) * SCALE;
     let start_x = center_x - text_width / 2;
     let start_y = center_y - (GLYPH_HEIGHT * SCALE) / 2;
 
-    for (index, character) in chars.iter().enumerate() {
-        let glyph = glyph(*character);
+    for (index, character) in text.chars().enumerate() {
+        let glyph = glyph(character);
         let glyph_x = start_x + index as i32 * (GLYPH_WIDTH + GAP) * SCALE;
         for (row, bits) in glyph.iter().enumerate() {
             for column in 0..GLYPH_WIDTH {
@@ -103,6 +117,63 @@ fn glyph(character: char) -> [u8; 5] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn render_uncached(unread: u32) -> BadgeImage {
+        let mut icon = image::load_from_memory(BASE_ICON)
+            .unwrap()
+            .resize_exact(ICON_SIZE, ICON_SIZE, FilterType::Lanczos3)
+            .to_rgba8();
+        if unread > 0 {
+            draw_badge(&mut icon, unread);
+        }
+        BadgeImage {
+            rgba: icon.into_raw(),
+            width: ICON_SIZE,
+            height: ICON_SIZE,
+        }
+    }
+
+    #[test]
+    fn cached_render_preserves_pixels_and_resets_after_badging() {
+        for count in [0, 1, 9, 42, 99, 100, u32::MAX, 0] {
+            assert_eq!(render(count).unwrap(), render_uncached(count));
+        }
+    }
+
+    #[test]
+    fn display_count_changes_only_when_icon_changes() {
+        for count in [0, 1, 99, 100, 101, 9_999, u32::MAX] {
+            assert_eq!(
+                render(count).unwrap(),
+                render(display_count(count)).unwrap()
+            );
+        }
+        assert_ne!(display_count(99), display_count(100));
+        assert_eq!(display_count(100), display_count(101));
+    }
+
+    #[test]
+    #[ignore = "manual benchmark; run with --release --ignored --nocapture"]
+    fn benchmark_badge_rendering() {
+        use std::{hint::black_box, time::Instant};
+
+        const ITERATIONS: u32 = 500;
+        render(0).unwrap();
+        let start = Instant::now();
+        for count in 0..ITERATIONS {
+            black_box(render_uncached(black_box(count % 101)));
+        }
+        let uncached = start.elapsed();
+        let start = Instant::now();
+        for count in 0..ITERATIONS {
+            black_box(render(black_box(count % 101)).unwrap());
+        }
+        let cached = start.elapsed();
+        println!(
+            "{ITERATIONS} badge renders: uncached {uncached:?}, cached {cached:?}, {:.1}x faster",
+            uncached.as_secs_f64() / cached.as_secs_f64()
+        );
+    }
 
     #[test]
     fn base_icon_and_badges_have_stable_dimensions() {

@@ -47,6 +47,19 @@ There is no npm or frontend build step.
 cargo tauri dev
 ```
 
+Run the unit tests with `cargo test --manifest-path src-tauri/Cargo.toml --locked`.
+The native WebKit regression check uses an isolated, temporary profile and requires a graphical session:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --locked native_webview_regressions -- --ignored --test-threads=1
+```
+
+To compare cached badge rendering with repeated PNG decoding and resizing:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --locked --release benchmark_badge_rendering -- --ignored --nocapture
+```
+
 The first launch should show WhatsApp's QR code. Linking state is kept in WebKit's persistent application data directory associated with `io.github.alan13367.whatsapp-linux-tauri`. Replacing or rebuilding the AppImage does not intentionally clear this profile.
 
 ### Compatibility gate
@@ -92,14 +105,18 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./dist/*.AppImage
 - Closing the window hides it when the tray was created; if tray setup fails, closing exits normally.
 - If a desktop hides an otherwise-created tray icon, launching the AppImage again restores the single running window; terminate it from the system process manager if needed.
 - Left-clicking the tray icon toggles the main window where the tray host supports click events.
+- The tray show/hide action restores a minimized window.
 - A second launch shows and focuses the existing process.
-- `Ctrl+Shift+B` toggles a 10px privacy blur and shows the window if hidden.
-- Global shortcuts may be blocked by some Wayland compositors. The tray privacy action remains available.
+- `Ctrl+Shift+B` toggles a 10px privacy blur. On X11 it also shows the window if hidden when global registration succeeds.
+- On Wayland, use the shortcut while the window is focused or use the tray privacy action. An X11 registration failure also falls back to the window shortcut.
+- The Linux privacy stylesheet stays active during page reloads and applies immediately, without a blur animation.
 - Linux tray tooltips and dynamic window icons are not honored by every desktop shell.
 
 ## Downloads and media
 
 Downloads use WebKitGTK's normal destination handling. WhatsApp remote content receives no generic filesystem command or shell access. File inputs, HTML drag/drop, and clipboard access remain handled by the webview.
+
+Local attachment blobs from the primary WhatsApp origin can download while the top-level page remains on that origin. Blob documents never replace the application page.
 
 The AppImage intentionally does not bundle Tauri's GStreamer media framework because that option is documented as fully supported only on Ubuntu build systems. The Arch GStreamer packages listed above are runtime dependencies.
 
@@ -112,7 +129,7 @@ WebKitGTK camera/microphone permissions are considered only for the exact `https
 - **No sound/video:** install all listed GStreamer plugin groups and restart the app.
 - **No notifications:** ensure a notification daemon is running and notifications are enabled for the application.
 - **No tray icon:** install/enable an AppIndicator or StatusNotifier host for the desktop environment.
-- **Shortcut unavailable:** use the tray privacy item; restrictive Wayland sessions may reject global shortcut registration.
+- **Shortcut unavailable:** focus the application and try `Ctrl+Shift+B`, or use the tray privacy item. Wayland uses a window shortcut.
 - **AppImage will not mount:** install `fuse2` or use `APPIMAGE_EXTRACT_AND_RUN=1`.
 - **Reset login state:** quit the application, back up anything needed, then remove `${XDG_DATA_HOME:-$HOME/.local/share}/io.github.alan13367.whatsapp-linux-tauri`. This permanently logs out the wrapper.
 
